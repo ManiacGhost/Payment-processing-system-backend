@@ -8,6 +8,7 @@ import mongoose from 'mongoose';
 import authRoutes from './routes/auth.js';
 import paymentRoutes from './routes/payments.js';
 import webhookRoutes from './routes/webhooks.js';
+import simulateRoutes from './routes/simulate.js';
 
 async function main() {
   const app = express();
@@ -53,6 +54,7 @@ async function main() {
   app.use('/api/auth', authRoutes);
   app.use('/api/payments', paymentRoutes);
   app.use('/api/webhooks', webhookRoutes);
+  app.use('/api/simulate', simulateRoutes);
 
   // Connect to MongoDB (don't block server startup)
   const MONGODB_URI = process.env.MONGODB_URI;

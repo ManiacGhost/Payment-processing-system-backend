@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Payment } from '../models/Payment.js';
 import { WebhookLog } from '../models/WebhookLog.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
+import { retryQueue } from '../lib/RetryQueue.js';
 
 const router = Router();
 
@@ -18,30 +19,58 @@ class CircuitBreaker {
   private failures = 0;
   private lastFailure = 0;
   private state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
+  private halfOpenProbeInFlight = false; // allow only ONE probe in HALF_OPEN
   constructor(private threshold = 5, private resetMs = 15000) {}
 
   get currentState() {
-    if (this.state === 'OPEN' && Date.now() - this.lastFailure > this.resetMs) this.state = 'HALF_OPEN';
+    if (this.state === 'OPEN' && Date.now() - this.lastFailure > this.resetMs) {
+      this.state = 'HALF_OPEN';
+      this.halfOpenProbeInFlight = false;
+      console.log('[CircuitBreaker] → HALF_OPEN (probing)');
+    }
     return this.state;
   }
-  canExecute() { const s = this.currentState; return s === 'CLOSED' || s === 'HALF_OPEN'; }
-  recordSuccess() { this.failures = 0; this.state = 'CLOSED'; }
+
+  canExecute(): boolean {
+    const s = this.currentState;
+    if (s === 'CLOSED') return true;
+    if (s === 'HALF_OPEN' && !this.halfOpenProbeInFlight) {
+      this.halfOpenProbeInFlight = true; // only one probe at a time
+      return true;
+    }
+    return false;
+  }
+
+  recordSuccess() {
+    if (this.state === 'HALF_OPEN') console.log('[CircuitBreaker] Probe succeeded → CLOSED');
+    this.failures = 0;
+    this.state = 'CLOSED';
+    this.halfOpenProbeInFlight = false;
+  }
+
   recordFailure() {
     this.failures++;
     this.lastFailure = Date.now();
-    if (this.failures >= this.threshold) { this.state = 'OPEN'; console.log(`[CircuitBreaker] OPEN`); }
+    this.halfOpenProbeInFlight = false;
+    if (this.failures >= this.threshold) {
+      this.state = 'OPEN';
+      console.log(`[CircuitBreaker] OPEN after ${this.failures} failures`);
+    }
   }
-  getInfo() { return { state: this.currentState, failures: this.failures, threshold: this.threshold, resetMs: this.resetMs }; }
+
+  getInfo() {
+    return { state: this.currentState, failures: this.failures, threshold: this.threshold, resetMs: this.resetMs };
+  }
 }
 const circuitBreaker = new CircuitBreaker();
 
 // --- Rate Limiter ---
 const rateMap = new Map<string, { count: number; resetAt: number }>();
-function checkRate(userId: string): boolean {
+function checkRate(userId: string, limit = 10, windowMs = 60000): boolean {
   const now = Date.now();
   const e = rateMap.get(userId);
-  if (!e || now > e.resetAt) { rateMap.set(userId, { count: 1, resetAt: now + 60000 }); return true; }
-  if (e.count >= 10) return false;
+  if (!e || now > e.resetAt) { rateMap.set(userId, { count: 1, resetAt: now + windowMs }); return true; }
+  if (e.count >= limit) return false;
   e.count++;
   return true;
 }
@@ -86,23 +115,64 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     const existing = await Payment.findOne({ idempotencyKey });
     if (existing) return res.json({ payment: existing, razorpayKeyId: process.env.RAZORPAY_KEY_ID, duplicate: true });
 
-    const order = await withRetry(
+    // Optimistic payment record so the queue job can update it
+    const payment = await Payment.create({
+      userId, amount, currency: currency.toUpperCase(), status: 'PENDING', idempotencyKey,
+      metadata: metadata || {},
+      logs: [{ timestamp: new Date(), event: 'ORDER_QUEUED', details: 'Enqueued for Razorpay order creation' }],
+    });
+
+    const paymentId = payment._id.toString();
+
+    // Try inline first (circuit is CLOSED) — fall back to queue if open
+    if (circuitBreaker.canExecute()) {
+      try {
+        const order = await withRetry(
+          () => razorpay.orders.create({
+            amount: Math.round(amount * 100),
+            currency: currency.toUpperCase(),
+            receipt: idempotencyKey,
+            notes: { userId } as any,
+          }), 3, 'CreateOrder'
+        );
+        payment.razorpayOrderId = order.id;
+        payment.logs.push({ timestamp: new Date(), event: 'ORDER_CREATED', details: `Razorpay: ${order.id}` });
+        await payment.save();
+        console.log(`[Payment] ${paymentId} | ${order.id} | ₹${amount}`);
+        return res.status(201).json({ payment, razorpayKeyId: process.env.RAZORPAY_KEY_ID, razorpayOrderId: order.id });
+      } catch (inlineErr: any) {
+        console.warn(`[Payment] Inline creation failed, falling back to queue: ${inlineErr.message}`);
+      }
+    }
+
+    // Queue-based retry: enqueue and return 202 Accepted
+    retryQueue.enqueue(
+      paymentId,
       () => razorpay.orders.create({
         amount: Math.round(amount * 100),
         currency: currency.toUpperCase(),
         receipt: idempotencyKey,
         notes: { userId } as any,
-      }), 3, 'CreateOrder'
+      }),
+      async (order) => {
+        await Payment.findByIdAndUpdate(paymentId, {
+          razorpayOrderId: order.id,
+          $push: { logs: { timestamp: new Date(), event: 'ORDER_CREATED', details: `Queue success: ${order.id}` } },
+        });
+        console.log(`[RetryQueue] Payment ${paymentId} order created: ${order.id}`);
+      },
+      async (err) => {
+        await Payment.findByIdAndUpdate(paymentId, {
+          status: 'FAILED',
+          lastError: err.message,
+          $push: { logs: { timestamp: new Date(), event: 'ORDER_FAILED', details: err.message } },
+        });
+        console.error(`[RetryQueue] Payment ${paymentId} permanently failed: ${err.message}`);
+      },
+      { maxAttempts: 5, baseDelayMs: 1000, label: `CreateOrder:${paymentId}` }
     );
 
-    const payment = await Payment.create({
-      userId, amount, currency: currency.toUpperCase(), status: 'PENDING', idempotencyKey,
-      razorpayOrderId: order.id, metadata: metadata || {},
-      logs: [{ timestamp: new Date(), event: 'ORDER_CREATED', details: `Razorpay: ${order.id}` }],
-    });
-
-    console.log(`[Payment] ${payment._id} | ${order.id} | ₹${amount}`);
-    res.status(201).json({ payment, razorpayKeyId: process.env.RAZORPAY_KEY_ID, razorpayOrderId: order.id });
+    return res.status(202).json({ payment, queued: true, message: 'Order creation queued due to temporary Razorpay unavailability' });
   } catch (err: any) {
     console.error('[Payments] Create error:', err.message);
     res.status(500).json({ error: err.message });
@@ -168,6 +238,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   const payment = await Payment.findOne({ _id: req.params.id, userId: req.userId });
   if (!payment) return res.status(404).json({ error: 'Not found' });
   res.json(payment);
+});
+
+// GET /api/payments/queue/stats — queue monitoring endpoint
+router.get('/queue/stats', async (_req: AuthRequest, res: Response) => {
+  res.json({ ...retryQueue.getStats(), circuitBreaker: circuitBreaker.getInfo() });
 });
 
 // --- System Stats (exported for use in webhooks too) ---
