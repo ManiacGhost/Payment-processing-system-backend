@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { Payment } from '../models/Payment.js';
 import { WebhookLog } from '../models/WebhookLog.js';
 import { circuitBreaker, locks } from './payments.js';
@@ -112,14 +113,19 @@ router.get('/stats', authenticate, async (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const filter = { userId };
 
+  // aggregate pipelines don't auto-cast strings to ObjectId — must do it explicitly
+  const userObjectId = new mongoose.Types.ObjectId(userId);
+  const aggFilter = { userId: userObjectId };
+
   const [total, pending, processing, success, failed, vol, retries, whCount] = await Promise.all([
     Payment.countDocuments(filter),
     Payment.countDocuments({ ...filter, status: 'PENDING' }),
     Payment.countDocuments({ ...filter, status: 'PROCESSING' }),
     Payment.countDocuments({ ...filter, status: 'SUCCESS' }),
     Payment.countDocuments({ ...filter, status: 'FAILED' }),
-    Payment.aggregate([{ $match: { ...filter, status: 'SUCCESS' } }, { $group: { _id: null, t: { $sum: '$amount' } } }]),
-    Payment.aggregate([{ $match: filter }, { $group: { _id: null, t: { $sum: '$retryCount' } } }]),
+    // Volume = sum of ALL payment attempts (success + failed), not just SUCCESS
+    Payment.aggregate([{ $match: aggFilter }, { $group: { _id: null, t: { $sum: '$amount' } } }]),
+    Payment.aggregate([{ $match: aggFilter }, { $group: { _id: null, t: { $sum: '$retryCount' } } }]),
     (async () => {
       const userPayments = await Payment.find(filter).select('_id').lean();
       const ids = userPayments.map(p => p._id.toString());
