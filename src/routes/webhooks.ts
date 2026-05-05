@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { Payment } from '../models/Payment.js';
 import { WebhookLog } from '../models/WebhookLog.js';
 import { circuitBreaker, locks } from './payments.js';
+import { authenticate, AuthRequest } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -92,23 +93,38 @@ router.post('/razorpay', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/webhooks — list webhook logs
-router.get('/', async (_req: Request, res: Response) => {
-  const logs = await WebhookLog.find().sort({ createdAt: -1 }).limit(50);
+// GET /api/webhooks — list webhook logs for the authenticated user
+router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
+  const userId = req.userId!;
+
+  // Find all payment IDs belonging to this user
+  const userPayments = await Payment.find({ userId }).select('_id').lean();
+  const paymentIds = userPayments.map(p => p._id.toString());
+
+  const logs = await WebhookLog.find({ paymentId: { $in: [...paymentIds, 'UNKNOWN'] } })
+    .sort({ createdAt: -1 })
+    .limit(50);
   res.json(logs);
 });
 
-// GET /api/system/stats
-router.get('/stats', async (_req: Request, res: Response) => {
+// GET /api/webhooks/stats — per-user stats
+router.get('/stats', authenticate, async (req: AuthRequest, res: Response) => {
+  const userId = req.userId!;
+  const filter = { userId };
+
   const [total, pending, processing, success, failed, vol, retries, whCount] = await Promise.all([
-    Payment.countDocuments(),
-    Payment.countDocuments({ status: 'PENDING' }),
-    Payment.countDocuments({ status: 'PROCESSING' }),
-    Payment.countDocuments({ status: 'SUCCESS' }),
-    Payment.countDocuments({ status: 'FAILED' }),
-    Payment.aggregate([{ $match: { status: 'SUCCESS' } }, { $group: { _id: null, t: { $sum: '$amount' } } }]),
-    Payment.aggregate([{ $group: { _id: null, t: { $sum: '$retryCount' } } }]),
-    WebhookLog.countDocuments(),
+    Payment.countDocuments(filter),
+    Payment.countDocuments({ ...filter, status: 'PENDING' }),
+    Payment.countDocuments({ ...filter, status: 'PROCESSING' }),
+    Payment.countDocuments({ ...filter, status: 'SUCCESS' }),
+    Payment.countDocuments({ ...filter, status: 'FAILED' }),
+    Payment.aggregate([{ $match: { ...filter, status: 'SUCCESS' } }, { $group: { _id: null, t: { $sum: '$amount' } } }]),
+    Payment.aggregate([{ $match: filter }, { $group: { _id: null, t: { $sum: '$retryCount' } } }]),
+    (async () => {
+      const userPayments = await Payment.find(filter).select('_id').lean();
+      const ids = userPayments.map(p => p._id.toString());
+      return WebhookLog.countDocuments({ paymentId: { $in: ids } });
+    })(),
   ]);
 
   res.json({
