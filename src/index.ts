@@ -27,7 +27,18 @@ async function main() {
   });
 
   // Configure middleware and routes
-  app.use(cors({ origin: true, credentials: true }));
+  const allowedOrigins = [
+    'https://payment-processing-system-frontend.pages.dev',
+    'http://localhost:3000',
+    'http://localhost:5173',
+  ];
+
+  app.use(cors({
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }));
   app.use(express.json());
 
   // Health check endpoint (doesn't require DB)
