@@ -1,0 +1,455 @@
+{
+  "info": {
+    "name": "NexusPay API",
+    "_postman_id": "nexuspay-collection-v2",
+    "description": "Complete API collection for NexusPay Payment Processing System.\n\n**Setup:**\n1. `baseUrl` is pre-filled with the Render URL\n2. Run Register or Login — `authToken` is saved automatically\n3. All protected requests use `{{authToken}}` automatically\n\n**Simulation Scenarios:** success | failure | timeout | network_error | partial_failure | random",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://payment-processing-system-backend.onrender.com", "type": "string" },
+    { "key": "authToken", "value": "", "type": "string" },
+    { "key": "paymentId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/health",
+            "description": "Check server and database connectivity."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.accessToken) {",
+                  "  pm.collectionVariables.set('authToken', res.accessToken);",
+                  "  console.log('Token saved:', res.accessToken);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test User\",\n  \"email\": \"test@example.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "description": "Register a new user. Automatically saves accessToken to {{authToken}}."
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.accessToken) {",
+                  "  pm.collectionVariables.set('authToken', res.accessToken);",
+                  "  console.log('Token saved:', res.accessToken);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "description": "Login and get access token. Automatically saves accessToken to {{authToken}}."
+          }
+        },
+        {
+          "name": "Get Profile",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/auth/me",
+            "description": "Get logged-in user profile."
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"YOUR_REFRESH_TOKEN_HERE\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/auth/logout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"YOUR_REFRESH_TOKEN_HERE\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        {
+          "name": "Create Payment Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.payment && res.payment._id) {",
+                  "  pm.collectionVariables.set('paymentId', res.payment._id);",
+                  "  console.log('Payment ID saved:', res.payment._id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"idempotencyKey\": \"order_{{$randomUUID}}\",\n  \"metadata\": { \"description\": \"Test payment\" }\n}"
+            },
+            "description": "Create a real Razorpay order. Returns razorpayOrderId for frontend checkout."
+          }
+        },
+        {
+          "name": "Verify Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/payments/verify",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentId\": \"{{paymentId}}\",\n  \"razorpay_order_id\": \"order_XXXX\",\n  \"razorpay_payment_id\": \"pay_XXXX\",\n  \"razorpay_signature\": \"SIGNATURE_FROM_RAZORPAY\"\n}"
+            },
+            "description": "Verify Razorpay payment signature after checkout completes."
+          }
+        },
+        {
+          "name": "List All Payments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/payments",
+            "description": "Get last 50 payments for the authenticated user."
+          }
+        },
+        {
+          "name": "Get Payment by ID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}",
+            "description": "Get a single payment with full log history."
+          }
+        },
+        {
+          "name": "Mark Payment as Failed",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/payments/{{paymentId}}/fail",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"USER_CANCELLED\"\n}"
+            },
+            "description": "Manually mark a payment as failed (e.g., user closed checkout)."
+          }
+        },
+        {
+          "name": "Queue Stats",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/payments/queue/stats",
+            "description": "View retry queue status, job history, and circuit breaker state."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Gateway Simulation",
+      "item": [
+        {
+          "name": "Get All Scenarios",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/simulate/scenarios",
+            "description": "List all available simulation scenarios with descriptions."
+          }
+        },
+        {
+          "name": "Simulate — Success",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"success\"\n}"
+            },
+            "description": "Gateway processes payment successfully with 100–600ms delay."
+          }
+        },
+        {
+          "name": "Simulate — Failure",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"failure\"\n}"
+            },
+            "description": "Gateway declines the payment — payment saved as FAILED."
+          }
+        },
+        {
+          "name": "Simulate — Timeout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"timeout\"\n}"
+            },
+            "description": "Gateway hangs for 11 seconds — tests timeout handling. Response will be slow."
+          }
+        },
+        {
+          "name": "Simulate — Network Error",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"network_error\"\n}"
+            },
+            "description": "Simulates connection refused / network outage."
+          }
+        },
+        {
+          "name": "Simulate — Partial Failure (Inline Retry)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"partial_failure\"\n}"
+            },
+            "description": "Fails attempts 1 and 2, succeeds on attempt 3. Demonstrates inline retry with exponential backoff."
+          }
+        },
+        {
+          "name": "Simulate — Random",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\",\n  \"scenario\": \"random\"\n}"
+            },
+            "description": "Weighted random: 60% success, 20% failure, 10% timeout, 10% network error."
+          }
+        },
+        {
+          "name": "Simulate — Queue Retry (Async)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/payment/retry",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"currency\": \"INR\"\n}"
+            },
+            "description": "Returns 202 immediately. Enqueues job in RetryQueue with partial_failure scenario. Poll GET /api/payments/:id to watch PENDING → SUCCESS after ~3 retries with exponential backoff."
+          }
+        },
+        {
+          "name": "Simulate — Trip Circuit Breaker",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/circuit-breaker",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"failures\": 6\n}"
+            },
+            "description": "Fires 6 rapid failures to trip the circuit breaker to OPEN state. Check circuitBreaker.state in response."
+          }
+        },
+        {
+          "name": "Simulate — Reset Circuit Breaker",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/circuit-breaker/reset",
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Resets the circuit breaker back to CLOSED state."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhook Edge Cases",
+      "item": [
+        {
+          "name": "Simulate — Early Callback",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/webhook/early",
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Fires a webhook for an order_id that doesn't exist in the DB yet. Shows early callback handling — logged as IGNORED/UNKNOWN. Real handler returns 404 so Razorpay retries automatically."
+          }
+        },
+        {
+          "name": "Simulate — Duplicate Callback",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/webhook/duplicate",
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Creates a payment and fires the same webhook event twice. First event is PROCESSED, second is IGNORED via deduplication check on WebhookLog collection."
+          }
+        },
+        {
+          "name": "Simulate — Conflicting Callback",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/simulate/webhook/conflict",
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Creates a FAILED payment then fires a payment.captured webhook for it. Payment state is NOT overwritten — logged as CONFLICT in WebhookLog."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "List Webhook Logs",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/webhooks",
+            "description": "Get last 50 webhook event logs."
+          }
+        },
+        {
+          "name": "System Stats",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": "{{baseUrl}}/api/webhooks/stats",
+            "description": "Payment stats, volume, circuit breaker state, and active processing count."
+          }
+        },
+        {
+          "name": "Test Webhook (Manual Fire)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/webhooks/razorpay",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"payment.captured\",\n  \"payload\": {\n    \"payment\": {\n      \"entity\": {\n        \"id\": \"pay_test_manual_001\",\n        \"order_id\": \"order_REPLACE_WITH_REAL_ORDER_ID\",\n        \"status\": \"captured\",\n        \"amount\": 50000\n      }\n    }\n  }\n}"
+            },
+            "description": "Manually fire a webhook event (no signature needed for testing). Replace order_id with a real ID from your DB to get PROCESSED result."
+          }
+        }
+      ]
+    }
+  ]
+}

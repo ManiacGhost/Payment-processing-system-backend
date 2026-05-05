@@ -1,6 +1,7 @@
-import { Router, Response } from 'express';
+import { Router, Response, Request } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { Payment } from '../models/Payment.js';
+import { WebhookLog } from '../models/WebhookLog.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
 import { simulateGateway, SimulationScenario } from '../lib/GatewaySimulator.js';
 import { retryQueue } from '../lib/RetryQueue.js';
@@ -188,6 +189,172 @@ router.get('/scenarios', (_req, res) => {
       { name: 'partial_failure', description: 'Fails on attempts 1 and 2, succeeds on attempt 3 — demonstrates retry' },
       { name: 'random',          description: 'Weighted random: 60% success, 20% failure, 10% timeout, 10% network error' },
     ],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/simulate/webhook/early
+// Fires a webhook for an order_id that does NOT exist in the DB yet.
+// Demonstrates: early callback handling — server retries findOne, then returns
+// 404 so Razorpay knows to retry the webhook later.
+// ---------------------------------------------------------------------------
+router.post('/webhook/early', async (req: AuthRequest, res: Response) => {
+  const fakeOrderId = `order_early_${uuidv4().slice(0, 8)}`;
+
+  const webhookPayload = {
+    event: 'payment.captured',
+    payload: {
+      payment: {
+        entity: {
+          id: `pay_early_${uuidv4().slice(0, 8)}`,
+          order_id: fakeOrderId,
+          status: 'captured',
+          amount: 50000,
+        },
+      },
+    },
+  };
+
+  // Internally call the webhook handler logic inline to show the behaviour
+  const payment = await Payment.findOne({ razorpayOrderId: fakeOrderId });
+
+  if (!payment) {
+    await WebhookLog.create({
+      paymentId: 'UNKNOWN',
+      source: 'razorpay',
+      eventType: webhookPayload.event,
+      payload: webhookPayload,
+      result: 'IGNORED',
+    });
+    return res.status(200).json({
+      scenario: 'early_callback',
+      description: 'Webhook arrived before payment record existed in DB',
+      fakeOrderId,
+      webhookResult: 'IGNORED — logged as UNKNOWN, real handler returns 404 to trigger Razorpay retry',
+      webhookLogCreated: true,
+    });
+  }
+
+  return res.json({ scenario: 'early_callback', note: 'Payment was found (not truly an early callback)' });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/simulate/webhook/duplicate
+// Creates a real payment then fires the same webhook event twice rapidly.
+// Demonstrates: duplicate deduplication — second event is IGNORED.
+// ---------------------------------------------------------------------------
+router.post('/webhook/duplicate', async (req: AuthRequest, res: Response) => {
+  const idempotencyKey = `sim_wh_dup_${uuidv4()}`;
+  const payment = await Payment.create({
+    userId: req.userId!,
+    amount: 500,
+    currency: 'INR',
+    status: 'PENDING',
+    idempotencyKey,
+    metadata: { simulated: true, scenario: 'duplicate_webhook' },
+    logs: [{ timestamp: new Date(), event: 'SIM_INITIATED', details: 'duplicate webhook test' }],
+  });
+
+  const entity = {
+    id: `pay_dup_${uuidv4().slice(0, 8)}`,
+    order_id: `order_dup_${uuidv4().slice(0, 8)}`,
+    status: 'captured',
+    amount: 50000,
+  };
+
+  // Manually set razorpayOrderId so webhook lookup works
+  payment.razorpayOrderId = entity.order_id;
+  payment.status = 'PROCESSING';
+  await payment.save();
+
+  const eventType = 'payment.captured';
+  const payload = { event: eventType, payload: { payment: { entity } } };
+
+  // --- First webhook: should PROCESS ---
+  payment.status = 'SUCCESS';
+  payment.razorpayPaymentId = entity.id;
+  payment.logs.push({ timestamp: new Date(), event: 'WEBHOOK_APPLIED', details: 'First webhook → SUCCESS' });
+  await payment.save();
+  const log1 = await WebhookLog.create({ paymentId: payment._id.toString(), source: 'razorpay', eventType, payload, result: 'PROCESSED' });
+
+  // --- Second webhook: same entity.id + eventType → should IGNORE ---
+  const alreadyProcessed = await WebhookLog.findOne({
+    eventType,
+    'payload.payload.payment.entity.id': entity.id,
+    result: 'PROCESSED',
+  });
+
+  let secondResult: string;
+  if (alreadyProcessed) {
+    secondResult = 'IGNORED — duplicate detected via WebhookLog deduplication check';
+  } else {
+    await WebhookLog.create({ paymentId: payment._id.toString(), source: 'razorpay', eventType, payload, result: 'IGNORED' });
+    secondResult = 'IGNORED — logged';
+  }
+
+  return res.status(200).json({
+    scenario: 'duplicate_callback',
+    description: 'Same webhook event fired twice for the same payment',
+    paymentId: payment._id,
+    firstWebhook: { result: 'PROCESSED', logId: log1._id },
+    secondWebhook: { result: secondResult },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/simulate/webhook/conflict
+// Creates a FAILED payment then fires a payment.captured webhook for it.
+// Demonstrates: conflicting state — webhook result is CONFLICT, state not overwritten.
+// ---------------------------------------------------------------------------
+router.post('/webhook/conflict', async (req: AuthRequest, res: Response) => {
+  const idempotencyKey = `sim_wh_conflict_${uuidv4()}`;
+  const orderId = `order_conflict_${uuidv4().slice(0, 8)}`;
+
+  const payment = await Payment.create({
+    userId: req.userId!,
+    amount: 500,
+    currency: 'INR',
+    status: 'FAILED',   // already in terminal state
+    razorpayOrderId: orderId,
+    idempotencyKey,
+    lastError: 'USER_CANCELLED',
+    metadata: { simulated: true, scenario: 'conflict_webhook' },
+    logs: [
+      { timestamp: new Date(), event: 'SIM_INITIATED', details: 'conflict webhook test' },
+      { timestamp: new Date(), event: 'FAILED', details: 'USER_CANCELLED' },
+    ],
+  });
+
+  // Incoming webhook says payment succeeded — conflicts with FAILED state
+  const entity = {
+    id: `pay_conflict_${uuidv4().slice(0, 8)}`,
+    order_id: orderId,
+    status: 'captured',
+    amount: 50000,
+  };
+  const eventType = 'payment.captured';
+  const payload = { event: eventType, payload: { payment: { entity } } };
+
+  const statusBefore = payment.status;
+
+  // Conflict logic (mirrors webhook handler)
+  const result = 'CONFLICT';
+  payment.logs.push({
+    timestamp: new Date(),
+    event: 'WEBHOOK_IGNORED',
+    details: `Already ${payment.status}, incoming: SUCCESS (CONFLICT)`,
+  });
+  await payment.save();
+  await WebhookLog.create({ paymentId: payment._id.toString(), source: 'razorpay', eventType, payload, result });
+
+  return res.status(200).json({
+    scenario: 'conflict_callback',
+    description: 'Webhook says SUCCESS but payment is already FAILED',
+    paymentId: payment._id,
+    statusBefore,
+    statusAfter: payment.status,
+    webhookResult: result,
+    explanation: 'State was NOT overwritten. Logged as CONFLICT in WebhookLog.',
   });
 });
 
