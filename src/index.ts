@@ -39,6 +39,8 @@ async function main() {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   }));
+  // Razorpay webhooks need raw body for signature verification — register BEFORE express.json()
+  app.use('/api/webhooks/razorpay', express.raw({ type: 'application/json' }));
   app.use(express.json());
 
   // Health check endpoint (doesn't require DB)

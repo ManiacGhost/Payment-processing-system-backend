@@ -13,14 +13,19 @@ function mapStatus(s: string) {
 // POST /api/webhooks/razorpay — public endpoint (no auth, signature verified)
 router.post('/razorpay', async (req: Request, res: Response) => {
   const sig = req.headers['x-razorpay-signature'] as string;
+
+  // req.body is a raw Buffer here (express.raw middleware applied in index.ts)
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
+
   if (sig) {
-    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET!)
-      .update(JSON.stringify(req.body)).digest('hex');
+    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET!)
+      .update(rawBody).digest('hex');
     if (expected !== sig) return res.status(400).json({ error: 'Invalid signature' });
   }
 
-  const event = req.body.event;
-  const entity = req.body.payload?.payment?.entity;
+  const parsedBody = JSON.parse(rawBody.toString());
+  const event = parsedBody.event;
+  const entity = parsedBody.payload?.payment?.entity;
   if (!entity?.order_id) return res.status(200).send('OK');
 
   console.log(`[Webhook] ${event} | Order: ${entity.order_id}`);
@@ -28,7 +33,7 @@ router.post('/razorpay', async (req: Request, res: Response) => {
   try {
     const payment = await Payment.findOne({ razorpayOrderId: entity.order_id });
     if (!payment) {
-      await WebhookLog.create({ paymentId: 'UNKNOWN', source: 'razorpay', eventType: event, payload: req.body, result: 'IGNORED' });
+      await WebhookLog.create({ paymentId: 'UNKNOWN', source: 'razorpay', eventType: event, payload: parsedBody, result: 'IGNORED' });
       return res.status(200).send('OK');
     }
 
@@ -46,7 +51,7 @@ router.post('/razorpay', async (req: Request, res: Response) => {
     }
 
     await payment.save();
-    await WebhookLog.create({ paymentId: payment._id.toString(), source: 'razorpay', eventType: event, payload: req.body, result });
+    await WebhookLog.create({ paymentId: payment._id.toString(), source: 'razorpay', eventType: event, payload: parsedBody, result });
     res.status(200).json({ result });
   } catch (err: any) {
     console.error('[Webhook Error]:', err.message);
